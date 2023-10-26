@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: proxy
+  name: proxy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: proxy
+  template:
+    metadata:
+      labels:
+        app: proxy
+    spec:
+      containers:
+      - image: mwennrich/vpn-proxy:test
+        imagePullPolicy: Always
+        name: proxy
+        ports:
+        - containerPort: 8080
+          protocol: TCP

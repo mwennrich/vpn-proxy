@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy
+  namespace: default
+spec:
+  externalTrafficPolicy: Local
+  loadBalancerIP: 100.127.199.4
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: proxy
+  type: LoadBalancer

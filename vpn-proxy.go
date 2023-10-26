@@ -10,33 +10,51 @@ import (
 	"time"
 )
 
-func handleHTTPSProxyClient(clientConn net.Conn, logger *slog.Logger) {
+func handleHTTPProxyClient(clientConn net.Conn, logger *slog.Logger) {
 
 	defer clientConn.Close()
+
+	var url, protocol, scheme, verb, requestLine, host, path string
+	vpn := false
+	header := []string{}
 
 	start := time.Now()
 	reader := bufio.NewReader(clientConn)
 
-	hostPort := ""
-	vpn := false
-	requestLine := ""
-	protocol := ""
-	header := []string{}
+	request, err := reader.ReadString('\n')
+	requestParts := strings.Fields(request)
+	if len(requestParts) == 3 && strings.HasPrefix(requestParts[2], "HTTP/") {
+		verb = requestParts[0]
+		url = requestParts[1]
+		protocol = requestParts[2]
+		requestLine = request
+	} else {
+		logger.Error("Error parsing request", "error", err, "line", request)
+		return
+	}
 
+	switch verb {
+	case "CONNECT":
+		scheme = "https"
+		host = url
+	default:
+		scheme = "http"
+		host = strings.Split(url, "/")[2]
+		if !strings.Contains(host, ":") {
+			host = host + ":80"
+		}
+		path = "/" + strings.Join(strings.Split(url, "/")[3:], "/")
+	}
+
+	// get request header
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			logger.Error("Error reading request line", "error", err)
 			return
 		}
-		logger.Debug("got", "line", line)
-		parts := strings.Fields(line)
-		if len(parts) == 3 && parts[0] == "CONNECT" {
-			hostPort = parts[1]
-			protocol = parts[2]
-			requestLine = line
-			continue
-		}
+		logger.Debug("got header", "line", line)
+
 		if strings.HasPrefix(line, "Reversed-VPN") {
 			vpn = true
 		}
@@ -45,9 +63,10 @@ func handleHTTPSProxyClient(clientConn net.Conn, logger *slog.Logger) {
 		}
 		header = append(header, line)
 	}
-	logger.Info("new connection", "from", clientConn.RemoteAddr().String(), "to", hostPort, "proto", protocol)
+	logger.Info("new connection", "from", clientConn.RemoteAddr().String(), "to", url, "proto", protocol, "scheme", scheme, "verb", verb)
 
-	serverAddr, err := net.ResolveTCPAddr("tcp", hostPort)
+	// connect to target
+	serverAddr, err := net.ResolveTCPAddr("tcp", host)
 	if err != nil {
 		logger.Error("Error resolving target address", "error", err)
 		return
@@ -61,17 +80,32 @@ func handleHTTPSProxyClient(clientConn net.Conn, logger *slog.Logger) {
 	serverConn.SetKeepAlive(true)
 	defer serverConn.Close()
 
-	clientConn.Write([]byte(protocol + " 200 OK\r\nConnection: Keep-Alive\r\n\r\n"))
+	if scheme == "https" {
+		// for https send 200 OK back to the client
+		clientConn.Write([]byte(protocol + " 200 OK\r\nConnection: Keep-Alive\r\n\r\n"))
+	} else {
+		// for http, sent http request to target
+		serverConn.Write([]byte(verb + " " + path + " " + protocol + "\r\n"))
+		logger.Debug("sending request", "line", verb+" "+path+" "+protocol)
+	}
 
+	// special handling for VPN
+	// forward request to target as another proxy request
 	if vpn {
-		logger.Info("proxying VPN connection", "from", clientConn.RemoteAddr().String(), "to", hostPort)
+		logger.Info("proxying VPN connection", "from", clientConn.RemoteAddr().String(), "to", url)
 		serverConn.Write([]byte(requestLine))
+	}
+
+	// if http or vpn special case, send all headers to target
+	if vpn || scheme == "http" {
 		for _, v := range header {
 			serverConn.Write([]byte(v))
+			logger.Debug("sending header", "line", v)
 		}
 		serverConn.Write([]byte("\r\n"))
 	}
 
+	// copy data between client and target
 	var bytesReceivedFromClient int64
 	go func(bytesReceivedFromClient *int64) {
 		w, err := io.Copy(serverConn, clientConn)
@@ -85,15 +119,17 @@ func handleHTTPSProxyClient(clientConn net.Conn, logger *slog.Logger) {
 	if err != nil {
 		logger.Debug("Error copying from target to client", "error", err)
 	}
+
 	clientConn.Close()
 	serverConn.Close()
-	logger.Info("connection closed", "from", clientConn.RemoteAddr().String(), "to", hostPort, "bytesReceivedFromClient", bytesReceivedFromClient, "bytesSentToClient", bytesSentToClient, "duration", time.Since(start).Truncate(time.Millisecond).String())
+	logger.Info("connection closed", "from", clientConn.RemoteAddr().String(), "to", url, "bytesReceivedFromClient", bytesReceivedFromClient, "bytesSentToClient", bytesSentToClient, "duration", time.Since(start).Truncate(time.Millisecond).String())
 }
 
 func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
+		// Level: slog.LevelDebug,
 	}))
 
 	listenAddress := ":8080"
@@ -119,6 +155,6 @@ func main() {
 			continue
 		}
 		clientConn.SetKeepAlive(true)
-		go handleHTTPSProxyClient(clientConn, logger)
+		go handleHTTPProxyClient(clientConn, logger)
 	}
 }
